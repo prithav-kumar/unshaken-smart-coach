@@ -3,8 +3,7 @@
 The database foundation uses **Python 3.12**, uv, SQLAlchemy Core, Psycopg 3,
 and Alembic. `backend/.python-version` selects the Python minor version;
 `backend/pyproject.toml` declares dependencies and `uv.lock` locks them.
-The verified interpreter was Python 3.12.10 on Windows. No FastAPI application
-or application endpoints are included yet.
+The verified interpreter was Python 3.12.10 on Windows. The FastAPI foundation provides GET /health/live and shared HTTP response behavior. See the API foundation section below.
 
 The shared Python telemetry package and synthetic FastAPI/script examples are
 now available. Product endpoints remain separate work. See
@@ -351,8 +350,7 @@ these guards are not authentication or a substitute for least-privilege roles.
 
 Package resources/migrations currently run from a repository checkout, not as a
 standalone deployed wheel. Runtime checks were on Windows/Docker Desktop;
-other operating systems were not exercised in this task. API integration and
-FastAPI remain separate implementation stories.
+other operating systems were not exercised in this task. The implemented API foundation and its macOS verification are described in the API foundation section above.
 
 ## Local verification evidence
 
