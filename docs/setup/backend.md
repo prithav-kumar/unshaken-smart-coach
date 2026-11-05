@@ -35,6 +35,166 @@ not installed, use `uv python install 3.12` before synchronization. Commit
 reviewed `pyproject.toml` and `uv.lock` together when publishing a change;
 never include `.venv` or a real `.env`.
 
+## API foundation — startup and verification
+
+The API foundation uses the existing Python 3.12 uv project and shared
+`app.telemetry` package. It provides `GET /health/live` and shared HTTP
+response and error behavior.
+
+From the repository root, synchronize the locked dependencies and check
+the Python version:
+
+```bash
+cd backend
+uv sync --locked
+uv run python --version
+```
+
+Start the backend from `backend/`:
+
+```bash
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+The application initializes shared telemetry during startup and shuts it
+down when the server exits. For a local run with telemetry disabled, use:
+
+```bash
+OTEL_SDK_DISABLED=true uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Keep the server terminal open. In another terminal, check liveness:
+
+```bash
+curl -i http://127.0.0.1:8000/health/live
+```
+
+Expect HTTP `200` with this JSON body:
+
+```json
+{"status":"alive"}
+```
+
+Successful and error responses include:
+
+- `Content-Type: application/json`
+- `Cache-Control: no-store`
+- `X-Request-ID` containing a server-generated UUID
+
+Each error body contains the same request ID as its response header:
+
+```json
+{
+  "error": {
+    "code": "invalid_request",
+    "message": "The request contains unsupported input.",
+    "request_id": "64a96af7-f5cc-49a9-918e-d5cdedcdd65b"
+  }
+}
+```
+
+The shared error contract is:
+
+| Condition | HTTP status | Error code |
+|---|---|---|
+| Unsupported query parameter or nonempty request body | 422 | `invalid_request` |
+| Unknown route | 404 | `not_found` |
+| Unsupported HTTP method | 405 | `method_not_allowed` |
+| Unexpected application failure | 500 | `internal_error` |
+
+HTTP `405` preserves the `Allow` header. Error messages omit submitted input,
+SQL, host details, credentials, connection strings, and stack traces.
+Request IDs provide correlation and grant no access.
+
+Check input rejection, routing errors, and caller-supplied request IDs:
+
+```bash
+curl -i 'http://127.0.0.1:8000/health/live?extra=1'
+curl -i -X GET --data 'sample' http://127.0.0.1:8000/health/live
+curl -i http://127.0.0.1:8000/missing
+curl -i -X POST http://127.0.0.1:8000/health/live
+curl -i -H 'X-Request-ID: caller-supplied' http://127.0.0.1:8000/health/live
+```
+
+Expect `422`, `422`, `404`, `405`, and `200`, respectively. The final response
+must contain a server-generated UUID. For each error, confirm that the body
+and header request IDs match.
+
+Run the automated API and telemetry checks from `backend/`:
+
+```bash
+uv run pytest tests/test_api_foundation.py tests/telemetry -q
+```
+
+The API tests exercise success, shared errors and headers, a controlled
+unexpected failure, telemetry initialization failure, and OpenAPI definitions.
+The controlled failure route exists only during its test. The telemetry
+initialization-failure test uses mocked functions.
+
+Review the generated OpenAPI document while the server is running:
+
+```bash
+curl -fsS http://127.0.0.1:8000/openapi.json | python3 -m json.tool
+```
+
+Confirm that it describes the liveness success body, shared error schemas,
+response statuses, request ID and cache headers, and `Allow` on HTTP `405`.
+
+Liveness checks whether the backend process can answer. Its handler makes
+no PostgreSQL, exercise-provider, AI, or telemetry-store requests. Startup,
+imports, and liveness perform no migrations, table creation, or seeding.
+
+To verify liveness during a dependency outage, first stop any running
+Uvicorn process with Ctrl+C. From the repository root, stop the local
+PostgreSQL and Alloy services and capture their status:
+
+```bash
+docker compose --profile observability stop postgres alloy
+docker compose --profile observability ps -a postgres alloy
+curl -sS --max-time 2 http://127.0.0.1:4318/
+```
+
+The services should be stopped or absent. A connection refusal on port
+`4318` confirms that the local collector is unreachable.
+
+Start a fresh backend process from `backend/`, explicitly enabling telemetry
+and directing all exporters to that unavailable local collector:
+
+```bash
+OTEL_SDK_DISABLED=false \
+OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:4318/v1/logs \
+OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://127.0.0.1:4318/v1/metrics \
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces \
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+In another terminal, repeat the liveness request:
+
+```bash
+curl -i http://127.0.0.1:8000/health/live
+```
+
+Expect HTTP `200`, `{"status":"alive"}`, and the shared response headers.
+Exporter connection failures may appear in the server terminal while the
+API continues responding.
+
+Record the tested commit, exact commands and results, service status,
+successful outage response, and OpenAPI review in the implementation PR.
+Distinguish mocked checks from live checks and remove credentials from evidence.
+
+Local verification on macOS using Python 3.12.14 recorded:
+
+- `uv sync --locked` succeeded, resolving 45 packages and checking 42.
+- The API foundation and telemetry suite reported 27 passed, 1 warning
+  in 0.98 seconds.
+- The warning concerned Starlette's deprecated HTTPX TestClient integration.
+- Manual requests verified success, input rejection, routing errors,
+  shared headers, and server-generated request IDs.
+- Live liveness returned HTTP `200` while PostgreSQL was stopped and
+  telemetry exporters reported connection failures to the local collector.
+- Generated OpenAPI included the success and error schemas, documented
+  statuses, and response headers.
+
 ## Private connection settings
 
 Keep the existing `DATABASE_URL` variable in the private root `.env`. The
